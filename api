@@ -1,0 +1,36 @@
+export default {
+  async fetch(request, env) {
+    if (request.method !== "POST") {
+      return new Response("Send a POST request", { status: 405 });
+    }
+
+    const cors = {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type",
+    };
+
+    const { message } = await request.json();
+
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": env.ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-6",
+        max_tokens: 500,
+        messages: [{ role: "user", content: message }],
+      }),
+    });
+
+    const data = await res.json();
+    const reply = data.content?.[0]?.text || "خطا در پاسخ";
+
+    return new Response(JSON.stringify({ reply }), {
+      headers: { "Content-Type": "application/json", ...cors },
+    });
+  },
+};
