@@ -1,36 +1,107 @@
+/**
+ * APEX AI — Chat backend for Cloudflare Workers
+ *
+ * This is what should run at your worker URL
+ * (spider-man.nova-b9d44d.workers.dev) so the Claude API key never
+ * touches the phone / APK. The app just POSTs { message, symbol, context }
+ * here, and this worker calls Anthropic on the server side.
+ *
+ * SETUP:
+ * 1. In your worker project folder, run:
+ *      npx wrangler secret put ANTHROPIC_API_KEY
+ *    and paste your key when prompted. This stores it encrypted on
+ *    Cloudflare's side — it is NOT visible in your source code, NOT
+ *    bundled into the app, and NOT readable by anyone inspecting the
+ *    APK or the HTML/JS.
+ *
+ * 2. Replace your worker's index.js with (or merge in) the code below.
+ *
+ * 3. Deploy:
+ *      npx wrangler deploy
+ *
+ * IMPORTANT: the key you pasted in chat earlier should be treated as
+ * already exposed. Generate a new one from console.anthropic.com and
+ * use ONLY the new one here — never paste a real key into a chat,
+ * commit it to a repo, or put it in any file that ships to a device.
+ */
+
 export default {
   async fetch(request, env) {
-    if (request.method !== "POST") {
-      return new Response("Send a POST request", { status: 405 });
-    }
 
-    const cors = {
+    // CORS so the WebView/app can call this from any origin
+    const corsHeaders = {
       "Access-Control-Allow-Origin": "*",
       "Access-Control-Allow-Methods": "POST, OPTIONS",
       "Access-Control-Allow-Headers": "Content-Type",
     };
 
-    const { message } = await request.json();
+    if (request.method === "OPTIONS") {
+      return new Response(null, { headers: corsHeaders });
+    }
 
-    const res = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": env.ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-6",
-        max_tokens: 500,
-        messages: [{ role: "user", content: message }],
-      }),
-    });
+    if (request.method !== "POST") {
+      return new Response("Method not allowed", { status: 405, headers: corsHeaders });
+    }
 
-    const data = await res.json();
-    const reply = data.content?.[0]?.text || "خطا در پاسخ";
+    try {
+      const body = await request.json();
+      const question = body.message || body.prompt || body.question || "";
+      const symbol = body.symbol || "";
+      const context = body.context || "";
 
-    return new Response(JSON.stringify({ reply }), {
-      headers: { "Content-Type": "application/json", ...cors },
-    });
+      if (!question) {
+        return new Response(JSON.stringify({ error: "No message provided" }), {
+          status: 400,
+          headers: { "Content-Type": "application/json", ...corsHeaders },
+        });
+      }
+
+      const anthropicResponse = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": env.ANTHROPIC_API_KEY, // <-- secret, never in client code
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-6",
+          max_tokens: 500,
+          system:
+            "You are APEX AI, a concise crypto/market assistant inside a trading-signal app. " +
+            "Answer clearly. You are not a licensed financial advisor — remind the user this " +
+            "is not financial advice when relevant, and never guarantee outcomes.",
+          messages: [
+            {
+              role: "user",
+              content: context
+                ? `${context}\n\nUser question: ${question}`
+                : question,
+            },
+          ],
+        }),
+      });
+
+      if (!anthropicResponse.ok) {
+        const errText = await anthropicResponse.text();
+        return new Response(JSON.stringify({ error: "Anthropic API error", detail: errText }), {
+          status: 502,
+          headers: { "Content-Type": "application/json", ...corsHeaders },
+        });
+      }
+
+      const data = await anthropicResponse.json();
+      const replyText = data?.content?.[0]?.text || "Sorry, I couldn't generate a response.";
+
+      // Shape matches what the app's extractReplyText() already checks for
+      return new Response(JSON.stringify({ response: replyText }), {
+        headers: { "Content-Type": "application/json", ...corsHeaders },
+      });
+
+    } catch (err) {
+      return new Response(JSON.stringify({ error: "Worker error", detail: String(err) }), {
+        status: 500,
+        headers: { "Content-Type": "application/json", ...corsHeaders },
+      });
+    }
   },
 };
